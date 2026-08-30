@@ -1,170 +1,225 @@
+"""
+Load CVE JSON records into the cve_management_system MySQL database.
 
-#NOTE, PLEASE TEST THIS!!!!!
+Setup before running:
+    pip install mysql-connector-python
 
-import sys
+"""
+
 import json
-from pathlib import Path
-from datetime import datetime
+import os
+import sys
+import mysql.connector
+from mysql.connector import Error
 
-from sqlalchemy.exc import IntegrityError
-from models import Session, Vendor, Product, ProductVendor, CVE, VulnClass, Affected
+# ---- CONFIG: edit these ----
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': 'mysql_password', #replace with your MySQL root password
+    'database': 'cve_management_system'
+}
+CVE_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CVEs')
+# -----------------------------
 
-
-def parse_date(value: str):
-    """CVE JSON dates look like '2020-01-08T18:25:12.000Z'."""
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
-def get_or_create_vendor(session, name: str) -> Vendor:
-    vendor = session.query(Vendor).filter_by(Name=name).first()
-    if vendor is None:
-        vendor = Vendor(Name=name)
-        session.add(vendor)
-        session.flush()  # get Vendor_ID without committing
-    return vendor
+# caches so we don't hit the DB or re-insert the same vendor/product/class repeatedly
+vendor_cache = {}
+product_cache = {}
+vuln_class_cache = {}
 
 
-def get_or_create_product(session, name: str, version: str) -> Product:
-    # One row per (Name, Ver) combination -- see schema discussion:
-    # Product.Ver can't hold multiple versions, so each version is its own row.
-    product = session.query(Product).filter_by(Name=name, Ver=version).first()
-    if product is None:
-        product = Product(Name=name, Ver=version)
-        session.add(product)
-        session.flush()
-    return product
+def safe_get(d, *keys, default=None):
+    """Walk a nested dict safely, returning default if any key is missing."""
+    for k in keys:
+        if isinstance(d, dict):
+            d = d.get(k)
+        else:
+            return default
+    return d if d is not None else default
 
 
-def load_record(session, data: dict):
-    cve_id = data.get("cveMetadata", {}).get("cveId")
-    if not cve_id:
-        return  # skip malformed records
+def parse_cve_file(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        data = json.load(f)
 
-    cna = data.get("containers", {}).get("cna", {})
+    cve_id = safe_get(data, 'cveMetadata', 'cveId')
+    date_published = safe_get(data, 'cveMetadata', 'datePublished')
+    if date_published:
+        date_published = date_published[:10]  # trim to YYYY-MM-DD for MySQL DATE
 
-    # --- CVE core fields ---
-    descriptions = cna.get("descriptions", [])
-    desc_text = next(
-        (d["value"] for d in descriptions if d.get("lang") == "en"), None
-    )
+    cna = safe_get(data, 'containers', 'cna', default={})
 
-    problem_types = cna.get("problemTypes", [])
-    type_text = None
-    if problem_types:
-        pt_desc = problem_types[0].get("descriptions", [])
-        type_text = next(
-            (d["description"] for d in pt_desc if d.get("lang") == "en"), None
-        )
+    # description
+    descriptions = cna.get('descriptions', [])
+    description = descriptions[0]['value'] if descriptions else None
 
-    # CVSS is often absent -- CVE JSON 5.0 doesn't guarantee a metrics block
-    cvss_score = None
-    metrics = cna.get("metrics", [])
-    for m in metrics:
-        for key in ("cvssV3_1", "cvssV3_0", "cvssV2_0"):
-            if key in m:
-                cvss_score = m[key].get("baseScore")
+    # CVSS base score (check v3.1, v3.0, v4.0 in that order)
+    cvss = None
+    for metric in cna.get('metrics', []):
+        for key in metric:
+            if key.lower().startswith('cvss'):
+                cvss = metric[key].get('baseScore')
                 break
-        if cvss_score is not None:
+        if cvss is not None:
             break
 
-    date_published = parse_date(data.get("cveMetadata", {}).get("datePublished"))
+    # vulnerability classification (CWE)
+    cwe_id = None
+    problem_types = cna.get('problemTypes', [])
+    if problem_types:
+        pdescs = problem_types[0].get('descriptions', [])
+        if pdescs:
+            cwe_id = pdescs[0].get('cweId') or pdescs[0].get('description')
+            if cwe_id:
+                cwe_id = cwe_id[:255]
 
-    cve_row = session.query(CVE).filter_by(CVE_ID=cve_id).first()
-    if cve_row is None:
-        cve_row = CVE(
-            CVE_ID=cve_id,
-            CVSS=cvss_score,
-            Date=date_published,
-            Desc=desc_text,
-            Type=type_text,
-        )
-        session.add(cve_row)
-        session.flush()
+    # affected vendor/product pairs
+    vendors_products = []
+    for a in cna.get('affected', []):
+        vendor = a.get('vendor')
+        product = a.get('product')
+        if vendor and product:
+            vendors_products.append((vendor.strip(), product.strip()))
 
-    # --- Vuln_Class (one per problemType entry, mirrors "Classified as") ---
-    if type_text:
-        vc = VulnClass(CVE_ID=cve_id, Type=type_text, CVSS=cvss_score)
-        session.add(vc)
+    # fix/patch description
+    solutions = cna.get('solutions', [])
+    fix_desc = solutions[0]['value'] if solutions else None
 
-    # --- Vendor / Product / Affected ---
-    affected_entries = cna.get("affected", [])
-    for entry in affected_entries:
-        vendor_name = entry.get("vendor", "n/a")
-        product_name = entry.get("product", "unknown")
-        versions = entry.get("versions", [])
-
-        vendor = get_or_create_vendor(session, vendor_name)
-
-        if not versions:
-            versions = [{"version": None}]
-
-        for v in versions:
-            version_val = v.get("version")
-            product = get_or_create_product(session, product_name, version_val)
-
-            # link Product <-> Vendor (skip duplicates)
-            exists = (
-                session.query(ProductVendor)
-                .filter_by(Product_ID=product.ID, Vendor_ID=vendor.Vendor_ID)
-                .first()
-            )
-            if not exists:
-                session.add(
-                    ProductVendor(Product_ID=product.ID, Vendor_ID=vendor.Vendor_ID)
-                )
-
-            # link Product <-> CVE (skip duplicates)
-            exists = (
-                session.query(Affected)
-                .filter_by(Product_ID=product.ID, CVE_ID=cve_id)
-                .first()
-            )
-            if not exists:
-                session.add(Affected(Product_ID=product.ID, CVE_ID=cve_id))
-
-    # NOTE: no PATCH data exists in cvelistV5 records -- PATCH table is
-    # intentionally left untouched here. Populate it from a separate source.
+    return {
+        'cve_id': cve_id,
+        'date': date_published,
+        'description': description,
+        'cvss': cvss,
+        'cwe_id': cwe_id,
+        'vendors_products': vendors_products,
+        'fix_desc': fix_desc,
+    }
 
 
-def main(root_dir: str):
-    session = Session()
-    root = Path(root_dir)
-    json_files = list(root.rglob("*.json"))
-    print(f"Found {len(json_files)} JSON files under {root_dir}")
+def get_or_create_vendor(cursor, name):
+    if name in vendor_cache:
+        return vendor_cache[name]
+    cursor.execute("SELECT Vendor_ID FROM VENDOR WHERE Name = %s", (name,))
+    row = cursor.fetchone()
+    if row:
+        vendor_cache[name] = row[0]
+        return row[0]
+    cursor.execute("INSERT INTO VENDOR (Name) VALUES (%s)", (name,))
+    vendor_cache[name] = cursor.lastrowid
+    return cursor.lastrowid
 
-    loaded, failed = 0, 0
-    for i, path in enumerate(json_files, 1):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            load_record(session, data)
-            loaded += 1
-        except Exception as e:
-            failed += 1
-            print(f"  [skip] {path.name}: {e}")
 
-        # commit in batches instead of per-file
-        if i % 500 == 0:
-            session.commit()
-            print(f"  ...committed {i}/{len(json_files)}")
+def get_or_create_product(cursor, name, vendor_id):
+    cache_key = (name, vendor_id)
+    if cache_key in product_cache:
+        return product_cache[cache_key]
+    cursor.execute(
+        "SELECT Product_ID FROM PRODUCT WHERE Name = %s AND Vendor_ID = %s",
+        (name, vendor_id)
+    )
+    row = cursor.fetchone()
+    if row:
+        product_cache[cache_key] = row[0]
+        return row[0]
+    cursor.execute(
+        "INSERT INTO PRODUCT (Name, Ver, Vendor_ID) VALUES (%s, %s, %s)",
+        (name, None, vendor_id)
+    )
+    product_cache[cache_key] = cursor.lastrowid
+    return cursor.lastrowid
+
+
+def get_or_create_vuln_class(cursor, cwe_id, cvss):
+    if not cwe_id:
+        return None
+    if cwe_id in vuln_class_cache:
+        return vuln_class_cache[cwe_id]
+    cursor.execute("SELECT Vuln_Class_ID FROM VULN_CLASS WHERE Type = %s", (cwe_id,))
+    row = cursor.fetchone()
+    if row:
+        vuln_class_cache[cwe_id] = row[0]
+        return row[0]
+    cursor.execute(
+        "INSERT INTO VULN_CLASS (Type, CVSS) VALUES (%s, %s)",
+        (cwe_id, cvss)
+    )
+    vuln_class_cache[cwe_id] = cursor.lastrowid
+    return cursor.lastrowid
+def main():
+    if not os.path.isdir(CVE_FOLDER):
+        print(f"ERROR: folder not found: {CVE_FOLDER}")
+        sys.exit(1)
 
     try:
-        session.commit()
-    except IntegrityError as e:
-        session.rollback()
-        print(f"Final commit failed: {e}")
-
-    session.close()
-    print(f"Done. Loaded {loaded}, failed {failed}.")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python3 load_cves.py /path/to/cvelistV5/cves")
+        conn = mysql.connector.connect(**DB_CONFIG)
+    except Error as e:
+        print(f"ERROR connecting to MySQL: {e}")
         sys.exit(1)
-    main(sys.argv[1])
+
+    cursor = conn.cursor()
+
+    json_files = [f for f in os.listdir(CVE_FOLDER) if f.endswith('.json')]
+    print(f"Found {len(json_files)} JSON files in {CVE_FOLDER}")
+
+    loaded = 0
+    skipped = 0
+
+    for filename in json_files:
+        filepath = os.path.join(CVE_FOLDER, filename)
+        try:
+            record = parse_cve_file(filepath)
+
+            if not record['cve_id']:
+                print(f"  skip {filename}: no CVE_ID found")
+                skipped += 1
+                continue
+
+            vuln_class_id = get_or_create_vuln_class(cursor, record['cwe_id'], record['cvss'])
+
+            # insert CVE (skip if already loaded)
+            cursor.execute("SELECT 1 FROM CVE WHERE CVE_ID = %s", (record['cve_id'],))
+            if cursor.fetchone():
+                skipped += 1
+                continue
+
+            cursor.execute(
+                """INSERT INTO CVE (CVE_ID, CVSS, Date, Description, Type, Vuln_Class_ID)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (record['cve_id'], record['cvss'], record['date'],
+                 record['description'], record['cwe_id'], vuln_class_id)
+            )
+
+            # insert vendor/product + AFFECTED link
+            for vendor_name, product_name in record['vendors_products']:
+                vendor_id = get_or_create_vendor(cursor, vendor_name)
+                product_id = get_or_create_product(cursor, product_name, vendor_id)
+                cursor.execute(
+                    """INSERT IGNORE INTO AFFECTED (Product_ID, CVE_ID) VALUES (%s, %s)""",
+                    (product_id, record['cve_id'])
+                )
+
+            # insert PATCH if there's a fix description
+            if record['fix_desc']:
+                cursor.execute(
+                    """INSERT INTO PATCH (Patch_Fix_Date, Fix_Desc, CVE_ID)
+                       VALUES (%s, %s, %s)""",
+                    (None, record['fix_desc'], record['cve_id'])
+                )
+
+            conn.commit()
+            loaded += 1
+            if loaded % 50 == 0:
+                print(f"  loaded {loaded} so far...")
+
+        except Error as e:
+            print(f"  ERROR on {filename}: {e}")
+            conn.rollback()
+            skipped += 1
+
+    print(f"\nDone. Loaded: {loaded}, Skipped: {skipped}")
+    cursor.close()
+    conn.close()
+
+
+if __name__ == '__main__':
+    main()

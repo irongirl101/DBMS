@@ -1,17 +1,13 @@
 CREATE DATABASE cve_management_system;
-SHOW DATABASES;
-
-USE cve_management_system;
-SHOW TABLES;
-
+use cve_management_system;
 CREATE TABLE VENDOR (
-    Vendor_ID     INT PRIMARY KEY,
+    Vendor_ID     INT AUTO_INCREMENT PRIMARY KEY,
     Name          VARCHAR(100) NOT NULL
 );
 DESC VENDOR;
 
 CREATE TABLE PRODUCT (
-    Product_ID    INT PRIMARY KEY,
+    Product_ID    INT AUTO_INCREMENT PRIMARY KEY,
     Name          VARCHAR(100) NOT NULL,
     Ver           VARCHAR(20),
     Vendor_ID     INT NOT NULL,
@@ -20,8 +16,8 @@ CREATE TABLE PRODUCT (
 DESC PRODUCT;
 
 CREATE TABLE VULN_CLASS (
-    Vuln_Class_ID INT PRIMARY KEY,
-    Type          VARCHAR(50),
+    Vuln_Class_ID INT AUTO_INCREMENT PRIMARY KEY,
+    Type          VARCHAR(255),
     CVSS          DECIMAL(3,1)
 );
 DESC VULN_CLASS;
@@ -32,13 +28,13 @@ CREATE TABLE CVE (
     Date          DATE,
     Description   TEXT,
     Type          VARCHAR(50),
-    Vuln_Class_ID INT NOT NULL,
+    Vuln_Class_ID INT NULL,
     FOREIGN KEY (Vuln_Class_ID) REFERENCES VULN_CLASS(Vuln_Class_ID)
 );
 DESC CVE;
 
 CREATE TABLE PATCH (
-    Patch_ID       INT PRIMARY KEY,
+    Patch_ID       INT AUTO_INCREMENT PRIMARY KEY,
     Patch_Fix_Date DATE,
     Fix_Desc       TEXT,
     CVE_ID         VARCHAR(20) UNIQUE,
@@ -56,3 +52,18 @@ CREATE TABLE AFFECTED (
 DESC AFFECTED;
 
 SHOW TABLES;
+
+TRUNCATE TABLE PATCH;
+TRUNCATE TABLE CVE;
+TRUNCATE TABLE PRODUCT;
+TRUNCATE TABLE VENDOR;
+TRUNCATE TABLE VULN_CLASS;
+
+-- To modify the column size of Name in VENDOR and PRODUCT tables, and Type in VULN_CLASS and CVE tables if the compiler skips anything due to insufficient size. 
+ALTER TABLE VENDOR MODIFY Name VARCHAR(500) NOT NULL;
+ALTER TABLE PRODUCT MODIFY Name VARCHAR(500) NOT NULL;
+ALTER TABLE VULN_CLASS MODIFY Type VARCHAR(500);
+ALTER TABLE CVE MODIFY Type VARCHAR(255);
+
+
+DROP DATABASE cve_management_system; 
