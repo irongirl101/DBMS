@@ -63,6 +63,9 @@ The project reads vulnerability information from JSON files and loads it into a 
 
 A Python script parses these files and inserts the data into the correct tables. In this way, the project transforms raw CVE data into a queryable database that can support tracking and analysis.
 
+## Semantic search with ChromaDB
+The `NoSQL` directory contains an optional ChromaDB index for semantic search over CVE descriptions, affected products, weakness types, and remediation text. MySQL remains the source of truth for relational queries; ChromaDB returns relevant CVE IDs that an application can use to retrieve complete records from MySQL. See [NoSQL/README.md](NoSQL/README.md) for setup and usage.
+
 ## What this project is trying to solve
 This project reflects a real-world software security need: organizations must keep track of vulnerabilities across their products, understand their impact, and prioritize fixes. The database helps with that by making the data searchable and organized.
 
