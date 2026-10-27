@@ -4,3 +4,8 @@ __pycache__/
 .env
 .pytest_cache/
 NoSQL/chroma_data/
+website/node_modules/
+website/.next/
+website/out/
+website/.env.local
+website/tsconfig.tsbuildinfo

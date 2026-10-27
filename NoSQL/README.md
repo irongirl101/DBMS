@@ -1,8 +1,12 @@
 # ChromaDB semantic search
 
-This directory adds semantic search for the project's CVE JSON dataset. MySQL remains the
-source of truth for structured records and relationships; ChromaDB stores searchable CVE
-text, embeddings, and a small set of metadata fields.
+ChromaDB provides a persistent semantic-search index for CVE documents. MySQL remains
+the source of truth for structured records and relationships. ChromaDB returns relevant
+CVE IDs; the Next.js server uses those IDs to fetch complete record details from MySQL.
+
+The index stores searchable text (description, CVSS, weakness, affected products, and
+remediation text when available), an embedding, and small metadata fields. It does not
+replace MySQL or archive every field of the original JSON document.
 
 The local setup uses ChromaDB's persistent Python client. Its database defaults to
 `~/.cve-management/chroma`, outside the repository. Set `CHROMA_PATH` to use another
@@ -24,7 +28,7 @@ Python executable printed by that command. This lets Pylance and the terminal us
 same installation. Installing without a virtual environment can affect other Python
 projects on this machine.
 
-## Index and search
+## Build or update the index
 
 Build or update the index from the JSON files in `CVEs\`:
 
@@ -32,30 +36,49 @@ Build or update the index from the JSON files in `CVEs\`:
 py NoSQL\index_cves.py
 ```
 
-Search in natural language:
+The script reads JSON files from `CVEs/` and upserts records into the `cve_records`
+collection using each CVE ID as a stable record ID. It reports records without
+descriptions and skips them because there is no text to embed. The first run may download
+ChromaDB's default embedding model; indexing and searches use that same default model.
+
+The persistent index defaults to `%USERPROFILE%\.cve-management\chroma`, outside the
+repository. To use another directory, set `CHROMA_PATH` before indexing and use the same
+setting when searching:
+
+```powershell
+$env:CHROMA_PATH = "D:\data\cve-chroma"
+py NoSQL\index_cves.py
+```
+
+## Search from the terminal
 
 ```powershell
 py NoSQL\search_cves.py "authentication bypass in a database server"
 py NoSQL\search_cves.py --limit 10 "remote code execution"
 ```
 
-Indexing uses CVE IDs as stable Chroma record IDs, so rerunning it updates existing
-records instead of adding duplicates. Records without descriptions are reported and
-skipped because there is no text to embed. Search results provide CVE IDs and descriptions;
-the application can use those IDs to fetch complete records and relationships from MySQL.
-
-To store the local index somewhere else, set the path before running either script:
+The website API uses JSON output:
 
 ```powershell
-$env:CHROMA_PATH = "D:\data\cve-chroma"
+py NoSQL\search_cves.py --json --limit 3 "authentication bypass"
 ```
 
-This is a local development index, not yet a web API. For a Next.js UI, expose semantic
-search through a server-side API route or a small Python service; do not connect the
-browser directly to the database.
+If the collection is missing, run the indexing command. If Python cannot import
+`chromadb`, install it above and confirm that `py` launches the same Python installation.
+
+## Website integration
+
+The Next.js semantic-search API runs the Python script server-side; Python and ChromaDB
+are not exposed to the browser. On Windows, the website defaults to `py`. Set
+`CHROMA_PYTHON` in `website/.env.local` if the Python launcher does not use the
+installation containing ChromaDB. Set `CHROMA_PATH` there if you use a non-default
+index directory.
+
+See [website/README.md](../website/README.md) for website setup and
+[the main README](../README.md) for architecture and project setup.
 
 ## Tests
 
 ```powershell
-py -m unittest discover -s NoSQL
+py -m unittest discover -s NoSQL -v
 ```

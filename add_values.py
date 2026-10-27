@@ -16,7 +16,7 @@ from mysql.connector import Error
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': 'mysql_password', #replace with your MySQL root password
+    'password': 'cass2601', #replace with your MySQL root password
     'database': 'cve_management_system'
 }
 CVE_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CVEs')
