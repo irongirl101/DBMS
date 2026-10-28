@@ -11,12 +11,13 @@ import os
 import sys
 import mysql.connector
 from mysql.connector import Error
+from api_keys import password
 
 # ---- CONFIG: edit these ----
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': 'cass2601', #replace with your MySQL root password
+    'password': password, #replace with your MySQL root password
     'database': 'cve_management_system'
 }
 CVE_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CVEs')
